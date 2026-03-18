@@ -9,12 +9,21 @@ from typing import List, Type
 from plugins.base import BrokerPlugin
 
 
+def _get_plugins_dir() -> str:
+    """Retorna diretório de plugins, com suporte a PyInstaller frozen."""
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.dirname(__file__))
+    return os.path.join(base, "plugins")
+
+
 def discover_plugins() -> List[Type[BrokerPlugin]]:
     """Varre o diretório plugins/ e retorna classes filhas de BrokerPlugin.
 
     Ordem de detecção: Monte Bravo antes de XP (plataforma compartilhada).
     """
-    plugins_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plugins")
+    plugins_dir = _get_plugins_dir()
 
     if plugins_dir not in sys.path:
         sys.path.insert(0, os.path.dirname(plugins_dir))

@@ -16,7 +16,19 @@ Aplicação CLI em Python para consolidar relatórios de posição/performance d
 pip install pdfplumber openpyxl
 ```
 
-## Uso
+## Uso com Interface Gráfica
+
+### Opção 1: Via Python
+
+```bash
+python gui.py
+```
+
+### Opção 2: Executável standalone (.exe)
+
+Basta dar duplo-clique no `Consolidador.exe` — não precisa de Python instalado.
+
+## Uso via CLI
 
 ```bash
 # Processar PDFs e gerar Excel
@@ -30,6 +42,14 @@ python main.py --input *.pdf --output carteira.xlsx --verbose
 
 # Listar plugins disponíveis
 python main.py --list-plugins
+```
+
+## Gerar o executável (.exe)
+
+```bash
+pip install pyinstaller
+python build.py
+# Resultado: dist/Consolidador.exe (~30-50MB)
 ```
 
 ## Testes
