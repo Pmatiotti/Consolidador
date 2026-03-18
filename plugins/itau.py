@@ -4,8 +4,6 @@ import logging
 import re
 from typing import List, Optional
 
-import pdfplumber
-
 from models.asset import Asset
 from plugins.base import BrokerPlugin
 from utils.asset_classifier import classify_asset, classify_classe
@@ -56,19 +54,11 @@ class ItauPlugin(BrokerPlugin):
     def extract(self, pdf_path: str) -> List[Asset]:
         assets = []
         try:
-            with pdfplumber.open(pdf_path) as pdf:
-                all_tables = []
-                full_text = ""
-                for page in pdf.pages:
-                    text = page.extract_text() or ""
-                    full_text += text + "\n"
-                    tables = page.extract_tables()
-                    for table in tables:
-                        all_tables.append(table)
-
-                assets = self._parse_all(full_text, all_tables)
+            from utils.pdf_reader import extract_from_pdf
+            full_text, all_tables = extract_from_pdf(pdf_path)
+            assets = self._parse_all(full_text, all_tables)
         except Exception as e:
-            logger.warning(f"Erro ao processar Itaú PDF {pdf_path}: {e}")
+            logger.warning(f"Erro ao processar Itau PDF {pdf_path}: {e}")
 
         return assets
 

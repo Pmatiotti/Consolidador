@@ -4,8 +4,6 @@ import logging
 import re
 from typing import List, Optional
 
-import pdfplumber
-
 from models.asset import Asset
 from plugins.base import BrokerPlugin
 from plugins.monte_bravo import MonteBravoPlugin
@@ -37,22 +35,15 @@ class XPPlugin(MonteBravoPlugin):
     def extract(self, pdf_path: str) -> List[Asset]:
         assets = []
         try:
-            with pdfplumber.open(pdf_path) as pdf:
-                full_text = ""
-                all_tables = []
-                for page in pdf.pages:
-                    text = page.extract_text() or ""
-                    full_text += text + "\n"
-                    tables = page.extract_tables()
-                    for table in tables:
-                        all_tables.append(table)
+            from utils.pdf_reader import extract_from_pdf
+            full_text, all_tables = extract_from_pdf(pdf_path)
 
-                # Use base Monte Bravo parsing
-                assets = self._parse_all(full_text, all_tables)
+            # Use base Monte Bravo parsing
+            assets = self._parse_all(full_text, all_tables)
 
-                # Also parse XP-specific sections
-                assets.extend(self._parse_previdencia(all_tables))
-                assets.extend(self._parse_coe(all_tables))
+            # Also parse XP-specific sections
+            assets.extend(self._parse_previdencia(all_tables))
+            assets.extend(self._parse_coe(all_tables))
 
         except Exception as e:
             logger.warning(f"Erro ao processar XP PDF {pdf_path}: {e}")

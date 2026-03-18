@@ -19,7 +19,8 @@ args = [
     '--hidden-import=plugins.xp',
     '--hidden-import=plugins.bradesco',
     '--hidden-import=plugins.itau',
-    '--hidden-import=pdfplumber',
+    '--hidden-import=fitz',
+    '--hidden-import=pymupdf',
     '--hidden-import=openpyxl',
 ]
 

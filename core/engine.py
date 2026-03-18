@@ -4,8 +4,6 @@ import logging
 import os
 from typing import Callable, List, Optional
 
-import pdfplumber
-
 from core.plugin_loader import discover_plugins
 from exporters.excel import export_excel
 from models.asset import Asset
@@ -64,14 +62,9 @@ def _process_single_pdf(pdf_path: str, plugins: list) -> List[Asset]:
 
 
 def _extract_text(pdf_path: str) -> str:
-    """Extrai texto completo do PDF usando pdfplumber."""
-    text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
+    """Extrai texto completo do PDF usando PyMuPDF."""
+    from utils.pdf_reader import extract_text
+    return extract_text(pdf_path)
 
 
 def process_pdfs_with_callback(
