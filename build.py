@@ -14,6 +14,7 @@ args = [
     '--windowed',
     '--name=Consolidador',
     '--add-data=plugins;plugins',
+    '--add-data=templates;templates',
     '--hidden-import=plugins.btg_pactual',
     '--hidden-import=plugins.monte_bravo',
     '--hidden-import=plugins.xp',
@@ -21,7 +22,9 @@ args = [
     '--hidden-import=plugins.itau',
     '--hidden-import=fitz',
     '--hidden-import=pymupdf',
+    '--hidden-import=pdfplumber',
     '--hidden-import=openpyxl',
+    '--hidden-import=templates.template_manager',
 ]
 
 if os.path.exists('assets/icon.ico'):
