@@ -130,11 +130,43 @@ class SantanderTextParser:
 
             i += 1
 
+        # Final cleanup: filter skip names and deduplicate
+        assets = self._cleanup(assets)
         return assets
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cleanup(assets: list) -> list:
+        """Remove skip-name assets and deduplicate by bruto value."""
+        skip_names = ("total", "subtotal", "fundos de investimento",
+                      "posição consolidada", "posicao consolidada",
+                      "posição detalhada", "posicao detalhada",
+                      "movimentação", "movimentacao", "rentabilidade")
+
+        # Step 1: filter skip names
+        filtered = [a for a in assets
+                    if not any(s in a.ativo.lower() for s in skip_names)]
+
+        # Step 2: deduplicate — if two assets have the same bruto value,
+        # keep the one with the longer (more descriptive) name
+        seen_bruto: dict = {}  # bruto_rounded -> index in unique list
+        unique = []
+        for a in filtered:
+            key = round(a.valor_bruto, 2) if a.valor_bruto else 0
+            if key > 0 and key in seen_bruto:
+                # Keep the more descriptive one (longer name)
+                existing_idx = seen_bruto[key]
+                if len(a.ativo) > len(unique[existing_idx].ativo):
+                    unique[existing_idx] = a
+                # else: keep existing (already more descriptive)
+            else:
+                seen_bruto[key] = len(unique)
+                unique.append(a)
+
+        return unique
 
     @staticmethod
     def _match_section(upper_line: str, section: str) -> bool:

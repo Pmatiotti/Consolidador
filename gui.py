@@ -360,6 +360,16 @@ class ConsolidadorApp:
         )
         self.btn_consolidar.pack(expand=True)
 
+        # --- Crédito ---
+        lbl_credit = tk.Label(
+            self.root,
+            text="Desenvolvido por Pedro Matiotti",
+            font=("Segoe UI", 8),
+            fg="#999999",
+            bg=BG,
+        )
+        lbl_credit.pack(side=tk.BOTTOM, pady=(0, 8))
+
     # --- Placeholder helpers ---
 
     def _on_ref_focus_in(self, _event):

@@ -68,6 +68,7 @@ def _create_carteira_sheet(wb: Workbook, assets: List[Asset]):
 
     # Data rows
     for row_idx, asset in enumerate(assets, 2):
+        liq_display = asset.valor_liquido if asset.valor_liquido is not None else asset.valor_bruto
         values = [
             asset.corretora,
             asset.ativo,
@@ -79,7 +80,7 @@ def _create_carteira_sheet(wb: Workbook, assets: List[Asset]):
             asset.liquidez,
             asset.valor_aplicado,
             asset.valor_bruto,
-            asset.valor_liquido,
+            liq_display,
             asset.classe,
             asset.subclasse,
         ]
@@ -139,7 +140,10 @@ def _create_resumo_sheet(wb: Workbook, assets: List[Asset], ref_date: Optional[s
 
     # Patrimônio total
     total_bruto = sum(a.valor_bruto for a in assets if a.valor_bruto)
-    total_liquido = sum(a.valor_liquido for a in assets if a.valor_liquido)
+    total_liquido = sum(
+        (a.valor_liquido if a.valor_liquido is not None else a.valor_bruto) or 0
+        for a in assets
+    )
 
     cell = ws.cell(row=row, column=1, value="Patrimônio Total Bruto")
     cell.font = SUBTITLE_FONT
@@ -170,8 +174,9 @@ def _group_totals(assets: List[Asset], key_func) -> dict:
             totals[key] = {"bruto": 0.0, "liquido": 0.0}
         if a.valor_bruto:
             totals[key]["bruto"] += a.valor_bruto
-        if a.valor_liquido:
-            totals[key]["liquido"] += a.valor_liquido
+        liq = a.valor_liquido if a.valor_liquido is not None else a.valor_bruto
+        if liq:
+            totals[key]["liquido"] += liq
     return totals
 
 
