@@ -23,10 +23,24 @@ class XPPlugin(MonteBravoPlugin):
     @staticmethod
     def detect(text: str) -> bool:
         lower = text.lower()
-        # NÃO pode ser Monte Bravo
+        # Exclusões — outros brokers que poderiam ser confundidos
         if "montebravo" in lower or "monte bravo" in lower:
             return False
-        return "xp investimentos" in lower or "xp" in lower
+        if "bradesco" in lower and ("relatório de investimentos" in lower or "composição" in lower):
+            return False
+        if ("safra" in lower or "safrabm" in lower) and "relatório mensal" in lower:
+            return False
+        if "itaú" in lower or "personnalité" in lower or "personnalite" in lower:
+            return False
+        if "santander" in lower:
+            return False
+        if "bb.com.br" in lower or "portfólio de investimentos" in lower:
+            return False
+        # Exigir indicadores fortes de XP
+        has_xp = "xp investimentos" in lower
+        has_precificacao = "precificação de renda fixa" in lower or "precificacao de renda fixa" in lower
+        has_posicao = "posição consolidada" in lower or "posicao consolidada" in lower
+        return has_xp and (has_precificacao or has_posicao)
 
     @staticmethod
     def broker_name() -> str:

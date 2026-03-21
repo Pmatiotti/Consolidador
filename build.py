@@ -26,7 +26,6 @@ args = [
     '--hidden-import=plugins.safra',
     '--hidden-import=plugins.text_parser_xp',
     '--hidden-import=plugins.text_parser_itau',
-    '--hidden-import=plugins.text_parser_one_book',
     '--hidden-import=fitz',
     '--hidden-import=pymupdf',
     '--hidden-import=pdfplumber',

@@ -34,11 +34,21 @@ class SantanderTextParser:
     @staticmethod
     def can_handle(text: str) -> bool:
         lower = text.lower()
-        return "santander" in lower and \
-               ("book de investimentos" in lower or "posição detalhada" in lower)
+        if "santander" not in lower:
+            return False
+        return ("book de investimentos" in lower or "posição detalhada" in lower
+                or "book " in lower and "crédito privado" in lower)
 
     def extract_from_text(self, full_text: str) -> List[Asset]:
         assets: List[Asset] = []
+
+        # Try Book format (CRÉDITO PRIVADO sections)
+        if self._is_book_format(full_text):
+            book_assets = self._parse_book_format(full_text)
+            if book_assets:
+                assets.extend(book_assets)
+
+        # Try standard Posição Detalhada format
         lines = full_text.split('\n')
 
         current_classe = ""
@@ -588,4 +598,192 @@ class SantanderTextParser:
             valor_liquido=saldo_liquido,
             classe="Fundo de Investimento",
             subclasse=subclasse if subclasse else "-",
+        ), consumed
+
+    # ------------------------------------------------------------------
+    # Book Santander format (CRÉDITO PRIVADO sections)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_book_format(text: str) -> bool:
+        """Detect Book Santander format (BOOK FEVEREIRO, etc.)."""
+        lower = text.lower()
+        return "crédito privado" in lower or "credito privado" in lower
+
+    def _parse_book_format(self, full_text: str) -> List[Asset]:
+        """Parse Book Santander with CRÉDITO PRIVADO sections.
+
+        Format: Produto | Data de Contratação | Saldo Bruto | Valor Disp. para Resgate | ...
+        Products appear as text lines followed by numeric data.
+        """
+        assets = []
+        lines = full_text.split('\n')
+
+        in_credito = False
+        current_subclasse = "Pós-fixado"
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            upper = line.upper()
+
+            # Detect CRÉDITO PRIVADO section
+            if "CRÉDITO PRIVADO" in upper or "CREDITO PRIVADO" in upper:
+                in_credito = True
+                # Detect subclass from context
+                if "PÓS" in upper or "POS" in upper or "CDI" in upper:
+                    current_subclasse = "Pós-fixado"
+                elif "PRÉ" in upper or "PRE" in upper:
+                    current_subclasse = "Pré-fixado"
+                elif "INFLAÇÃO" in upper or "INFLACAO" in upper or "IPCA" in upper:
+                    current_subclasse = "Inflação"
+                i += 1
+                continue
+
+            # Stop sections
+            if any(upper.startswith(s) for s in _STOP_SECTIONS):
+                in_credito = False
+                i += 1
+                continue
+
+            # Other section headers end CRÉDITO PRIVADO
+            if in_credito and self._is_section_line(upper):
+                in_credito = False
+                i += 1
+                continue
+
+            if not in_credito:
+                i += 1
+                continue
+
+            # Skip headers/totals
+            if self._is_skip_line(upper):
+                i += 1
+                continue
+
+            # Skip empty
+            if not line:
+                i += 1
+                continue
+
+            # Try to detect product name
+            if self._looks_like_book_product(line):
+                asset, consumed = self._extract_book_product(lines, i, current_subclasse)
+                if asset:
+                    assets.append(asset)
+                    i += consumed
+                    continue
+
+            i += 1
+
+        return assets
+
+    @staticmethod
+    def _looks_like_book_product(line: str) -> bool:
+        """Book product names: text with letters, not headers."""
+        if not line or len(line) < 3:
+            return False
+        if not re.search(r'[A-Za-z]', line):
+            return False
+        if line.startswith('R$') or line == '-':
+            return False
+        if re.match(r'^\d{2}/\d{2}/\d{4}$', line):
+            return False
+        if re.match(r'^[\d.,]+$', line):
+            return False
+        upper = line.upper()
+        skip = ("EMISSOR", "TOTAL", "SUBTOTAL", "TAXA", "ÍNDICE", "INDICE",
+                "DATA", "VALOR", "SALDO", "POSIÇÃO", "POSICAO", "RENTAB",
+                "CARTEIRA", "PRODUTO", "CONTRATAÇÃO", "CONTRATACAO",
+                "RESGATE", "PAGAMENTO", "NOTAS", "MOVIMENT", "DISTRIBUI",
+                "%", "CRÉDITO", "CREDITO")
+        return not any(upper.startswith(s) for s in skip)
+
+    def _extract_book_product(self, lines: list, start_idx: int,
+                               subclasse: str):
+        """Extract a product from Book format.
+
+        Product name on first line, followed by date and numeric values.
+        """
+        nome = lines[start_idx].strip()
+        dates_found = []
+        numbers_found = []
+        consumed = 1
+
+        for j in range(start_idx + 1, min(start_idx + 15, len(lines))):
+            item = lines[j].strip()
+            item_upper = item.upper()
+
+            # Stop at section boundaries
+            if (self._is_section_line(item_upper)
+                    or any(item_upper.startswith(s) for s in _STOP_SECTIONS)):
+                break
+            if self._is_skip_line(item_upper):
+                break
+
+            # Stop at next product (after collecting some data)
+            if numbers_found and self._looks_like_book_product(item):
+                break
+
+            consumed += 1
+
+            # Date
+            if re.match(r'^\d{2}/\d{2}/\d{4}$', item):
+                dates_found.append(item)
+                continue
+
+            # Percentage — skip
+            if re.match(r'^-?[\d.,]+%$', item):
+                continue
+
+            # Pure number
+            if re.match(r'^[\d.,]+$', item):
+                val = parse_br(item)
+                if val is not None:
+                    numbers_found.append(val)
+                continue
+
+        if not numbers_found:
+            return None, consumed
+
+        # Book format: numbers are saldo_bruto, valor_disp_resgate, etc.
+        # Take big numbers (>100) as monetary values
+        big = [n for n in numbers_found if n > 100]
+        if not big:
+            return None, consumed
+
+        saldo_bruto = big[0]
+        saldo_liquido = big[1] if len(big) >= 2 else None
+
+        data_contratacao = dates_found[0] if dates_found else None
+
+        tipo_ativo = classify_asset(nome)
+        if tipo_ativo == "Outro":
+            upper = nome.upper()
+            if any(k in upper for k in ["CDB", "LCI", "LCA", "LIG", "LCD"]):
+                for k in ["CDB", "LCI", "LCA", "LIG", "LCD"]:
+                    if k in upper:
+                        tipo_ativo = k
+                        break
+            elif any(k in upper for k in ["CRI", "CRA", "DEB"]):
+                for k in ["CRI", "CRA", "DEB"]:
+                    if k in upper:
+                        tipo_ativo = k
+                        break
+            else:
+                tipo_ativo = "CDB"
+
+        return Asset(
+            corretora=BROKER,
+            ativo=nome,
+            tipo_ativo=tipo_ativo,
+            data_aplicacao=parse_date(data_contratacao),
+            indexador="% CDI" if subclasse == "Pós-fixado" else ("IPCA +" if subclasse == "Inflação" else "Prefixado"),
+            taxa=None,
+            vencimento=None,
+            liquidez=None,
+            valor_aplicado=None,
+            valor_bruto=saldo_bruto,
+            valor_liquido=saldo_liquido,
+            classe=classify_classe(tipo_ativo),
+            subclasse=subclasse,
         ), consumed

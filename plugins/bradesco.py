@@ -28,6 +28,12 @@ SUBCLASSE_MAP = {
     "renda variável": "Renda Variável",
 }
 
+# Header words to detect concatenated header+data cells
+_HEADER_WORDS = ("produto", "ativo", "fundo", "emissor", "saldo bruto",
+                 "saldo líquido", "taxa de compra", "taxa ao ano",
+                 "data de aplicação", "data de venc", "valor principal",
+                 "carência", "venc. da carência")
+
 
 class BradescoPlugin(BrokerPlugin):
     @staticmethod
@@ -94,9 +100,121 @@ class BradescoPlugin(BrokerPlugin):
                 if any(k in lower_first for k in ["total", "composição", "composicao", "classe"]):
                     continue
 
+                # Check for multi-line concatenation: PyMuPDF sometimes merges
+                # header + product lines into a single cell with \n separators
+                # e.g. "Produto\n1 Bradesco Debêntures\nIncentivadas CDI\n2 Bradesco..."
+                if "\n" in first_cell and self._is_header_concat(first_cell):
+                    embedded = self._extract_from_concat_cell(first_cell, row_clean,
+                                                              header, current_classe,
+                                                              current_subclasse)
+                    assets.extend(embedded)
+                    continue
+
                 asset = self._parse_row(row_clean, header, current_classe, current_subclasse)
                 if asset:
                     assets.append(asset)
+
+        return assets
+
+    def _is_header_concat(self, cell: str) -> bool:
+        """Check if this cell is a header+data concatenation."""
+        first_line = cell.split("\n")[0].strip().lower()
+        return any(first_line.startswith(hw) for hw in _HEADER_WORDS)
+
+    def _extract_from_concat_cell(self, first_cell: str, row_clean: list,
+                                   header: list, classe: str,
+                                   subclasse: str) -> List[Asset]:
+        """Extract products from a concatenated header+data cell.
+
+        The cell looks like:
+        "Produto\n1 Bradesco Debêntures\nIncentivadas CDI\n2 Bradesco..."
+
+        Products are prefixed with a sequential number (1, 2, 3...).
+        Multi-line product names continue until the next numbered entry.
+        """
+        assets = []
+        lines = first_cell.split("\n")
+
+        # Skip the header line(s)
+        product_lines = []
+        started = False
+        for ln in lines:
+            stripped = ln.strip()
+            if not started:
+                # Skip until we find a numbered product line
+                if re.match(r'^\d+\s+', stripped):
+                    started = True
+                    product_lines.append(stripped)
+                continue
+            product_lines.append(stripped)
+
+        if not product_lines:
+            return assets
+
+        # Group lines by numbered products
+        products = []
+        current_name_parts = []
+        for ln in product_lines:
+            m = re.match(r'^(\d+)\s+(.+)', ln)
+            if m:
+                # Save previous product
+                if current_name_parts:
+                    products.append(" ".join(current_name_parts))
+                current_name_parts = [m.group(2).strip()]
+            else:
+                # Continuation of previous product name
+                if current_name_parts:
+                    current_name_parts.append(ln.strip())
+        # Save last product
+        if current_name_parts:
+            products.append(" ".join(current_name_parts))
+
+        # Also extract other columns that may be concatenated too
+        # Build parallel value lists from other concatenated cells
+        col_values = {}
+        for ci in range(1, len(row_clean)):
+            cell = row_clean[ci]
+            if "\n" in cell:
+                parts = cell.split("\n")
+                # Skip header line(s) from the column too
+                vals = []
+                for p in parts:
+                    p = p.strip()
+                    if not p:
+                        continue
+                    # Skip column headers
+                    p_lower = p.lower()
+                    if any(p_lower.startswith(hw) for hw in _HEADER_WORDS):
+                        continue
+                    vals.append(p)
+                col_values[ci] = vals
+            else:
+                col_values[ci] = [cell] if cell.strip() else []
+
+        col_map = {}
+        for i, h in enumerate(header):
+            col_map[h.lower().strip()] = i
+
+        # Create asset for each product
+        for pi, product_name in enumerate(products):
+            if not product_name or len(product_name) < 2:
+                continue
+            lower_pn = product_name.lower()
+            if any(k in lower_pn for k in ["total", "composição", "composicao", "classe"]):
+                continue
+
+            # Build a virtual row for this product index
+            virtual_row = [product_name]
+            for ci in range(1, len(row_clean)):
+                vals = col_values.get(ci, [])
+                if pi < len(vals):
+                    virtual_row.append(vals[pi])
+                else:
+                    virtual_row.append("")
+
+            asset = self._parse_row(virtual_row, header, classe, subclasse)
+            if asset:
+                assets.append(asset)
 
         return assets
 
@@ -104,6 +222,14 @@ class BradescoPlugin(BrokerPlugin):
         try:
             nome = row[0]
             if not nome or len(nome) < 2:
+                return None
+
+            # Skip date-like names (e.g. "01/01/2025")
+            if re.match(r'^\d{2}/\d{2}/\d{4}$', nome.strip()):
+                return None
+
+            # Skip pure number names
+            if re.match(r'^[\d.,]+$', nome.strip()):
                 return None
 
             col_map = {}

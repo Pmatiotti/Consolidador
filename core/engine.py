@@ -11,8 +11,6 @@ from plugins.text_parser_btg import BTGTextParser
 from plugins.text_parser_santander import SantanderTextParser
 from plugins.text_parser_xp import XPTextParser
 from plugins.text_parser_itau import ItauTextParser
-from plugins.text_parser_one_book import ONEBookTextParser
-
 logger = logging.getLogger(__name__)
 
 # Text parsers — fallback quando plugins detectam mas extraem 0 ativos
@@ -21,7 +19,6 @@ TEXT_PARSERS = [
     SantanderTextParser(),
     XPTextParser(),
     ItauTextParser(),
-    ONEBookTextParser(),
 ]
 
 # PDFs que nenhum plugin/template conseguiu processar (para a GUI)
