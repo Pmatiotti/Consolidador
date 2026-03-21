@@ -31,14 +31,14 @@ def classify_asset(name: str) -> str:
         return "LCI"
     if "LCD" in upper:
         return "LCD"
-    if "LIG" in upper:
-        return "LIG"
     if re.search(r'\bLF[\s\-]', upper) or upper.endswith("LF"):
         return "LF"
     if "NTN-B" in upper or "NTNB" in upper:
         return "NTN-B"
     if "DEB" in upper or "DEBÊNTURE" in upper or "DEBENTURE" in upper:
         return "DEB"
+    if re.search(r'\bLIG\b', upper) or upper.startswith("LIG "):
+        return "LIG"
     if "COE" in upper:
         return "COE"
     if "FII" in upper or "CI(" in upper:
