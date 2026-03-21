@@ -7,8 +7,13 @@ from typing import Callable, List, Optional
 from core.plugin_loader import discover_plugins
 from exporters.excel import export_excel
 from models.asset import Asset
+from plugins.text_parser_btg import BTGTextParser
+from plugins.text_parser_santander import SantanderTextParser
 
 logger = logging.getLogger(__name__)
+
+# Text parsers — fallback quando plugins detectam mas extraem 0 ativos
+TEXT_PARSERS = [BTGTextParser(), SantanderTextParser()]
 
 # PDFs que nenhum plugin/template conseguiu processar (para a GUI)
 UNPROCESSED_PDFS: List[str] = []
@@ -64,7 +69,19 @@ def _process_single_pdf(pdf_path: str, plugins: list) -> List[Asset]:
             logger.warning(f"  Erro no plugin {plugin_class.broker_name()}: {e}")
             continue
 
-    # Etapa 2: Tentar templates salvos
+    # Etapa 2: Tentar text parsers (fallback para PDFs com tabelas corrompidas)
+    for parser in TEXT_PARSERS:
+        try:
+            if parser.can_handle(text):
+                logger.info(f"  Text parser: {parser.BROKER}")
+                assets = parser.extract_from_text(text)
+                if assets:
+                    logger.info(f"  -> {len(assets)} ativos via text parser")
+                    return assets
+        except Exception as e:
+            logger.warning(f"  Erro no text parser {parser.BROKER}: {e}")
+
+    # Etapa 3: Tentar templates salvos
     assets = _try_templates(pdf_path, text)
     if assets:
         return assets
@@ -123,6 +140,10 @@ def process_pdfs_with_callback(
         # Tentar plugins
         assets = _try_plugins_cb(pdf_path, text, plugins, log)
 
+        # Tentar text parsers
+        if not assets:
+            assets = _try_text_parsers_cb(text, log)
+
         # Tentar templates
         if not assets:
             assets = _try_templates_cb(pdf_path, text, log)
@@ -157,6 +178,21 @@ def _try_plugins_cb(pdf_path, text, plugins, log):
                 log(f"  Plugin detectou mas extraiu 0 ativos")
         except Exception as e:
             log(f"  Erro no plugin {plugin_class.broker_name()}: {e}")
+    return []
+
+
+def _try_text_parsers_cb(text, log):
+    """Tenta text parsers com callback de log."""
+    for parser in TEXT_PARSERS:
+        try:
+            if parser.can_handle(text):
+                log(f"  Text parser: {parser.BROKER}")
+                assets = parser.extract_from_text(text)
+                if assets:
+                    log(f"  {len(assets)} ativos via text parser")
+                    return assets
+        except Exception as e:
+            log(f"  Erro no text parser {parser.BROKER}: {e}")
     return []
 
 
