@@ -45,8 +45,9 @@ def discover_plugins() -> List[Type[BrokerPlugin]]:
                     and obj.__module__ == module_name):
                 found.append(obj)
 
-    # Ordenar: Monte Bravo antes de XP
-    priority = {"Monte Bravo": 0, "XP": 1}
+    # Ordenar: Monte Bravo antes de XP, demais corretoras com prioridade padrão
+    priority = {"Monte Bravo": 0, "XP": 1, "Bradesco": 5, "BTG Pactual": 5,
+                "Itaú": 5, "Banco do Brasil": 5, "Safra": 5}
     found.sort(key=lambda p: priority.get(p.broker_name(), 5))
 
     return found
