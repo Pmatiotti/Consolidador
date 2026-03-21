@@ -43,6 +43,14 @@ def _is_asset_name(line: str) -> bool:
     # Must contain letters
     if not re.search(r'[A-Za-z]', line):
         return False
+    # Exclude "XX% do Total" subtotal lines
+    if "do total" in line.lower():
+        return False
+    # Exclude report headers captured as names
+    lower = line.lower()
+    if any(w in lower for w in ["relatório", "performance", "período",
+                                 "gerado em", "complementos", "mercados:"]):
+        return False
     # Exclude known non-name patterns
     if _SKIP_PATTERNS.match(line):
         return False
@@ -97,6 +105,13 @@ class BTGTextParser:
             assets.extend(self._parse_section_fundos(lines[fundo_start:fundo_end]))
         if rv_start is not None:
             assets.extend(self._parse_section_rv(lines[rv_start:rv_end]))
+
+        # Final cleanup: remove subtotals and report headers that slipped through
+        assets = [a for a in assets
+                  if "do total" not in a.ativo.lower()
+                  and "relatório" not in a.ativo.lower()
+                  and "performance" not in a.ativo.lower()
+                  and "página" not in a.ativo.lower()]
 
         return assets
 

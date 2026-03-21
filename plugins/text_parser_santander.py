@@ -328,27 +328,48 @@ class SantanderTextParser:
                 continue
 
         # --- Map values ---
-        # First number is taxa (small); remaining big numbers (>100) are monetary
-        if numbers_found:
-            taxa_str = numbers_found[0].replace('.', '').replace(',', '.')
-            try:
-                taxa_val = round(float(taxa_str), 2)
-            except (ValueError, TypeError):
-                pass
+        # For TESOURO/NTN-B: no taxa column, numbers are cotas/cota_val/bruto/liquido
+        is_tesouro = "TESOURO" in codigo.upper() or "NTN" in codigo.upper()
 
-        # Filter monetary values (>100) from remaining numbers
-        big_numbers: List[float] = []
-        for n in numbers_found[1:]:
-            val = parse_br(n)
-            if val and val > 100:
-                big_numbers.append(val)
+        if is_tesouro:
+            # Skip first 2 numbers (cotas + cota value), rest are monetary
+            all_big: List[float] = []
+            skip_count = 2
+            for idx_n, n in enumerate(numbers_found):
+                val = parse_br(n)
+                if idx_n < skip_count:
+                    continue
+                if val and val > 100:
+                    all_big.append(val)
+            if len(all_big) >= 1:
+                saldo_bruto = all_big[0]
+            if len(all_big) >= 2:
+                saldo_liquido = all_big[1]
+            # TESOURO/NTN-B in Inflação section: indexador = IPCA +
+            if not indice:
+                indice = "IPCA 100"
+        else:
+            # Standard RF: first number is taxa (small); remaining big numbers are monetary
+            if numbers_found:
+                taxa_str = numbers_found[0].replace('.', '').replace(',', '.')
+                try:
+                    taxa_val = round(float(taxa_str), 2)
+                except (ValueError, TypeError):
+                    pass
 
-        if len(big_numbers) >= 1:
-            valor_aplicado = big_numbers[0]
-        if len(big_numbers) >= 2:
-            saldo_bruto = big_numbers[1]
-        if len(big_numbers) >= 3:
-            saldo_liquido = big_numbers[2]
+            # Filter monetary values (>100) from remaining numbers
+            big_numbers: List[float] = []
+            for n in numbers_found[1:]:
+                val = parse_br(n)
+                if val and val > 100:
+                    big_numbers.append(val)
+
+            if len(big_numbers) >= 1:
+                valor_aplicado = big_numbers[0]
+            if len(big_numbers) >= 2:
+                saldo_bruto = big_numbers[1]
+            if len(big_numbers) >= 3:
+                saldo_liquido = big_numbers[2]
 
         if dates_found:
             data_compra = dates_found[0]
@@ -502,8 +523,10 @@ class SantanderTextParser:
         if not numbers_found:
             return None, consumed
 
-        # Filter big numbers (>100) = monetary values (skip cotas count, cota value)
-        big_numbers = [n for n in numbers_found if n > 100]
+        # Fundos sequence: qtde_cotas, valor_cota, saldo_bruto, [IR, IOF], saldo_liquido
+        # Skip first 2 numbers (cotas + cota value), then filter big values
+        remaining = numbers_found[2:] if len(numbers_found) > 2 else numbers_found
+        big_numbers = [n for n in remaining if n > 100]
         if not big_numbers:
             return None, consumed
 
