@@ -84,10 +84,12 @@ class SantanderTextParser:
             # --- Subtipo ---
             if upper in ("CRI", "CRA", "LCI", "LCA", "LIG", "CDB", "LCD",
                          "DEBÊNTURES", "DEBENTURES", "NTN-B", "NTNB"):
-                current_tipo = upper
-                is_fundos = False
-                i += 1
-                continue
+                if upper != current_tipo:
+                    current_tipo = upper
+                    is_fundos = False
+                    i += 1
+                    continue
+                # else: same subtipo — fall through to asset detection
             if upper in ("FUNDOS DE INVESTIMENTO", "FUNDOS"):
                 current_tipo = upper
                 is_fundos = True
@@ -95,6 +97,7 @@ class SantanderTextParser:
                 continue
             if upper.startswith("MERCADO A VISTA"):
                 current_tipo = "MERCADO A VISTA"
+                current_subclasse = "Ações"
                 is_fundos = False
                 i += 1
                 continue
@@ -181,6 +184,9 @@ class SantanderTextParser:
         upper = line.upper().strip()
         if upper in ("DI 100", "PRE 100", "IPCA 100", "DI100", "PRE100", "IPCA100"):
             return False
+        # "TESOURO ..." pattern (e.g. "TESOURO IPCA 2035")
+        if upper.startswith("TESOURO"):
+            return True
         # Pure alphanumeric code (e.g. "23H1037957", "CRA02300S37", "VRTA11")
         if re.match(r'^[A-Z0-9]{3,25}$', line):
             return True
@@ -322,7 +328,7 @@ class SantanderTextParser:
                 continue
 
         # --- Map values ---
-        # Order: taxa, valor_aplicado, saldo_bruto, ..., saldo_liquido
+        # First number is taxa (small); remaining big numbers (>100) are monetary
         if numbers_found:
             taxa_str = numbers_found[0].replace('.', '').replace(',', '.')
             try:
@@ -330,19 +336,19 @@ class SantanderTextParser:
             except (ValueError, TypeError):
                 pass
 
-        if len(numbers_found) >= 3:
-            valor_aplicado = parse_br(numbers_found[1])
-            saldo_bruto = parse_br(numbers_found[2])
-        elif len(numbers_found) >= 2:
-            saldo_bruto = parse_br(numbers_found[1])
+        # Filter monetary values (>100) from remaining numbers
+        big_numbers: List[float] = []
+        for n in numbers_found[1:]:
+            val = parse_br(n)
+            if val and val > 100:
+                big_numbers.append(val)
 
-        # saldo_liquido: find a large value after saldo_bruto
-        if len(numbers_found) >= 4:
-            for n in numbers_found[3:]:
-                val = parse_br(n)
-                if val and val > 100:
-                    saldo_liquido = val
-                    break
+        if len(big_numbers) >= 1:
+            valor_aplicado = big_numbers[0]
+        if len(big_numbers) >= 2:
+            saldo_bruto = big_numbers[1]
+        if len(big_numbers) >= 3:
+            saldo_liquido = big_numbers[2]
 
         if dates_found:
             data_compra = dates_found[0]
@@ -496,8 +502,14 @@ class SantanderTextParser:
         if not numbers_found:
             return None, consumed
 
-        # Saldo bruto = LAST number (after cotas, cota_value)
-        saldo_bruto = numbers_found[-1]
+        # Filter big numbers (>100) = monetary values (skip cotas count, cota value)
+        big_numbers = [n for n in numbers_found if n > 100]
+        if not big_numbers:
+            return None, consumed
+
+        saldo_bruto = big_numbers[0]
+        saldo_liquido = big_numbers[1] if len(big_numbers) >= 2 else None
+
         if saldo_bruto == 0:
             return None, consumed
 
@@ -518,7 +530,7 @@ class SantanderTextParser:
             liquidez=None,
             valor_aplicado=None,
             valor_bruto=saldo_bruto,
-            valor_liquido=None,
+            valor_liquido=saldo_liquido,
             classe="Fundo de Investimento",
             subclasse=subclasse if subclasse else "-",
         ), consumed

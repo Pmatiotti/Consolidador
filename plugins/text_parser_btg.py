@@ -24,7 +24,8 @@ _SKIP_PATTERNS = re.compile(
     r'Os principais|Saldo Bruto|Percentual|A rentabilidade|'
     r'Mês Atual|Ano|Desde|No Período|Benchmarks?|'
     r'% do CDI|Saldo bruto|Preço médio|Saldo líquido|Valor aplicado|'
-    r'Data Inicial|Quantidade|Vencimento|Taxa|Resgate|Preço)\b',
+    r'Data Inicial|Quantidade|Vencimento|Taxa|Resgate|Preço|'
+    r'% do Total|do Total|Página|Disclaimer|Fale conosco)\b',
     re.IGNORECASE
 )
 
@@ -100,6 +101,18 @@ class BTGTextParser:
         return assets
 
     @staticmethod
+    def _block_has_data(block: list) -> bool:
+        """Check if a block has any data lines (dates, R$ values, numbers)."""
+        for line in block:
+            if (re.match(r'^\d{2}/\d{2}/\d{4}$', line) or
+                    line.startswith('R$') or
+                    re.match(r'^[\d.,]+$', line) or
+                    re.match(r'^D\+\d+$', line) or
+                    _TAXA_KEYWORDS.match(line)):
+                return True
+        return False
+
+    @staticmethod
     def _find_section(lines: list, marker: str) -> Tuple[Optional[int], int]:
         """Find start and end of a section. End is the next section or stop marker."""
         start = None
@@ -114,6 +127,10 @@ class BTGTextParser:
                     'em renda fixa', 'em fundo de investimento',
                     'em renda variável', 'em coe',
                     'a rentabilidade completa', 'saldo bruto (r$) percentual',
+                    'por classe de ativos e estratégia',
+                    'por classe de ativos e estrategia',
+                    'saldo bruto (r$)', 'percentual %',
+                    'disclaimer', 'fale conosco',
                 ]) and i > start:
                     return start, i
         return start, len(lines) if start is not None else 0
@@ -178,10 +195,15 @@ class BTGTextParser:
 
             # Is this a new asset name?
             if _is_asset_name(line):
-                # Emit previous block
-                if current_block:
+                if current_block and self._block_has_data(current_block):
+                    # Previous block has data — emit it, start new block
                     blocks.append((current_block, current_subclasse))
-                current_block = [line]
+                    current_block = [line]
+                elif current_block:
+                    # Previous block has NO data yet — name continuation
+                    current_block.append(line)
+                else:
+                    current_block = [line]
             elif current_block:
                 # Data line — add to current block
                 current_block.append(line)

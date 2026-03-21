@@ -29,7 +29,7 @@ def classify_asset(name: str) -> str:
         return "LCA"
     if "LCI" in upper:
         return "LCI"
-    if "LCD" in upper:
+    if re.search(r'\bLCD\b', upper):
         return "LCD"
     if re.search(r'\bLF[\s\-]', upper) or upper.endswith("LF"):
         return "LF"
