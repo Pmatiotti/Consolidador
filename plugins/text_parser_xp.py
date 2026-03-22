@@ -28,10 +28,18 @@ _SECTION_MAP = {
     "inflacao": "Inflação",
 }
 
-# Stop markers
-_STOP_MARKERS = (
-    "saldo projetado", "saldo disponível", "saldo disponivel",
+# Soft skip markers — skip the line but continue processing
+# (these appear in sidebars within investment section pages)
+_SKIP_MARKERS = (
+    "saldo disponível", "saldo disponivel",
     "patrimônio", "patrimonio", "disclaimer",
+    "próximos vencimentos", "proximos vencimentos",
+)
+
+# Hard stop markers — end all processing once inside a section
+# (these appear only after all investment data has been extracted)
+_STOP_MARKERS = (
+    "saldo projetado",
 )
 
 
@@ -64,8 +72,12 @@ class XPTextParser:
             line = lines[i].strip()
             lower = line.lower()
 
-            # Stop markers
-            if any(m in lower for m in _STOP_MARKERS):
+            # Hard stop markers — end all processing once inside a section
+            if current_section and any(m in lower for m in _STOP_MARKERS):
+                break
+
+            # Skip markers — ignore these lines but continue processing
+            if any(m in lower for m in _SKIP_MARKERS):
                 i += 1
                 continue
 
@@ -151,6 +163,15 @@ class XPTextParser:
             "garantia", "bloqueio", "valor aplicado", "posição", "posicao",
             "valor líquido", "valor liquido", "data cota", "qtd cotas",
             "plano", "tributação", "tributacao", "emissor",
+            # Fund/COE column headers and metadata
+            "preço", "preco", "qtd.", "qtd ", "valor aplic",
+            "data aplica", "data de aplica",
+            "data de refer", "data refer",
+            "em cotização", "em cotizacao", "valor cota", "qtd cotas",
+            # Spaced page headers (e.g. "P O S I Ç Ã O  C O N S O L I D A D A")
+            "p o s i", "p r ó", "p r o x",
+            # Section/page labels that are not fund names
+            "precificação", "precificacao", "título", "titulo",
         )
         return any(lower.startswith(h) for h in headers) and len(lower) < 80
 
@@ -219,7 +240,17 @@ class XPTextParser:
                     break
                 if self._looks_like_rf_asset(next_line) and j > start + 1:
                     break
-                if self._looks_like_fund_name(next_line) and j > start + 3:
+                # Don't break on rate/index strings (e.g. "113,00% CDI", "IPC-A +5%")
+                is_rate_line = (
+                    re.match(r'^[\d,]+%', next_line) or
+                    re.match(r'^[\+\-]?[\d,]+%', next_line) or
+                    re.match(r'^IPC[-A-Z]', next_line, re.IGNORECASE) or
+                    next_line.lower().strip() in ('cdi', 'ipca', 'ipc-a', 'a.a.', 'pré', 'pre') or
+                    ('cdi' in next_line.lower() and '%' in next_line) or
+                    ('ipca' in next_line.lower() and ('+' in next_line or '%' in next_line)) or
+                    ('ipc-a' in next_line.lower() and ('+' in next_line or '%' in next_line))
+                )
+                if not is_rate_line and self._looks_like_fund_name(next_line) and j > start + 3:
                     break
 
                 consumed += 1
@@ -409,7 +440,13 @@ class XPTextParser:
         if not r_values:
             return None, 1
 
-        saldo_bruto = parse_br(r_values[0])
+        # COE columns: Preço (tiny, per unit) | Valor aplicado | Posição
+        # Use the largest value = Posição (current position value)
+        parsed = [parse_br(v) for v in r_values]
+        parsed = [v for v in parsed if v and v > 0]
+        if not parsed:
+            return None, consumed
+        saldo_bruto = max(parsed)
         if not saldo_bruto or saldo_bruto == 0:
             return None, consumed
 

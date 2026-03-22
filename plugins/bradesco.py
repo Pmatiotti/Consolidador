@@ -51,14 +51,22 @@ class BradescoPlugin(BrokerPlugin):
         assets = []
         try:
             from utils.pdf_reader import extract_from_pdf
-            _, all_tables = extract_from_pdf(pdf_path)
-            assets = self._parse_all(all_tables)
+            full_text, all_tables = extract_from_pdf(pdf_path)
+            assets = self._parse_all(all_tables, full_text)
         except Exception as e:
             logger.warning(f"Erro ao processar Bradesco PDF {pdf_path}: {e}")
 
         return assets
 
-    def _parse_all(self, tables: list) -> List[Asset]:
+    def _parse_all(self, tables: list, full_text: str = "") -> List[Asset]:
+        """Parse Bradesco tables.
+
+        Bradesco PDFs have two table structures:
+        - Type A: col-0 is a concat "Produto\\n1 Name1\\n2 Name2...", data in rows 1+
+          where each data row has col-1 = product name (or None for name-from-concat)
+        - Type B: no Produto column; header starts with "Data de\\naplicação";
+          product name comes from the PDF text preceding the table
+        """
         assets = []
         current_subclasse = "-"
         current_classe = "Renda Fixa"
@@ -68,51 +76,98 @@ class BradescoPlugin(BrokerPlugin):
                 continue
 
             header = [str(c).strip() if c else "" for c in table[0]]
-            header_lower = [h.lower() for h in header]
+            first_header_cell = header[0] if header else ""
 
-            for row in table:
-                if not row or not row[0]:
+            # Detect class headers from single-cell tables
+            if len(header) <= 2 and first_header_cell.lower() in (
+                    "renda fixa", "renda variável", "renda variavel",
+                    "renda variável\n", "renda variavel\n"):
+                if "variável" in first_header_cell.lower() or "variavel" in first_header_cell.lower():
+                    current_classe = "Renda Variável"
+                else:
+                    current_classe = "Renda Fixa"
+                continue
+
+            # Detect subclasse header tables (e.g. ["CDI/Selic", R$..., %])
+            # Only for simple single-line headers — concat cells may contain "cdi" in product names
+            if "\n" not in first_header_cell:
+                matched_sub_hdr = self._match_subclasse(first_header_cell.lower().strip())
+                if matched_sub_hdr is not None:
+                    current_subclasse = matched_sub_hdr
                     continue
 
-                row_clean = [str(c).strip() if c else "" for c in row]
-                first_cell = row_clean[0]
-                lower_first = first_cell.lower().strip()
+            # ---- Type A: Produto concat cell in col 0 of row 0 ----
+            if "\n" in first_header_cell and self._is_header_concat(first_header_cell):
+                embedded_names = self._extract_names_from_concat(first_header_cell)
+                emb_idx = 0
 
-                # Detect class headers
-                if lower_first in ("renda fixa", "renda variável", "renda variavel"):
-                    if "variável" in lower_first or "variavel" in lower_first:
-                        current_classe = "Renda Variável"
-                    else:
-                        current_classe = "Renda Fixa"
-                    continue
+                for row_idx, row in enumerate(table[1:], 1):  # Skip header row
+                    if not row:
+                        continue
+                    row_clean = [str(c).strip() if c else "" for c in row]
 
-                # Detect subclasse headers
-                matched_sub = self._match_subclasse(lower_first)
-                if matched_sub is not None:
-                    current_subclasse = matched_sub
-                    continue
+                    # Get nome from col 1 if it looks like a product name
+                    nome = ""
+                    if len(row_clean) > 1 and row_clean[1]:
+                        col1 = row_clean[1].replace('\n', ' ').strip()
+                        if (col1 and len(col1) >= 2
+                                and not re.match(r'^\d{2}/\d{2}/\d{2,4}$', col1)
+                                and not re.match(r'^[\d.,]+$', col1)
+                                and not col1.startswith('R$')):
+                            nome = col1
+                            emb_idx += 1
+                    # If no name from col 1, use next embedded name
+                    if not nome and emb_idx < len(embedded_names):
+                        nome = embedded_names[emb_idx]
+                        emb_idx += 1
 
-                # Skip header rows
-                if lower_first == "produto" or lower_first == "ativo":
-                    continue
+                    if not nome:
+                        continue
 
-                # Skip totals
-                if any(k in lower_first for k in ["total", "composição", "composicao", "classe"]):
-                    continue
+                    # Build a virtual row with nome in position 0
+                    virtual = [nome] + row_clean[1:]
+                    asset = self._parse_row(virtual, header, current_classe, current_subclasse)
+                    if asset:
+                        assets.append(asset)
+                continue
 
-                # Check for multi-line concatenation: PyMuPDF sometimes merges
-                # header + product lines into a single cell with \n separators
-                # e.g. "Produto\n1 Bradesco Debêntures\nIncentivadas CDI\n2 Bradesco..."
-                if "\n" in first_cell and self._is_header_concat(first_cell):
-                    embedded = self._extract_from_concat_cell(first_cell, row_clean,
-                                                              header, current_classe,
-                                                              current_subclasse)
-                    assets.extend(embedded)
-                    continue
+            # ---- Type B: No Produto column; header starts with "Data de\\naplicação" ----
+            header_joined = " ".join(h.lower() for h in header[:3])
+            if "data de" in header_joined and "produto" not in header_joined:
+                # Single data row — find name from full_text context
+                for row in table[1:]:
+                    if not row:
+                        continue
+                    row_clean = [str(c).strip() if c else "" for c in row]
+                    # Col 0 is the date; values at known positions
+                    # Find saldo_bruto from col_map
+                    col_map = {}
+                    for i, h in enumerate(header):
+                        col_map[h.lower().strip()] = i
+                    saldo_bruto_str = ""
+                    for kw in ["saldo bruto"]:
+                        for hk, idx in col_map.items():
+                            if kw in hk and idx < len(row_clean):
+                                saldo_bruto_str = row_clean[idx]
+                                break
+                    vb = parse_br(saldo_bruto_str)
+                    if not vb or vb == 0:
+                        continue
+                    # Find product name from full_text: line preceding R$vb
+                    vb_str_br = f"{vb:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    nome = self._find_name_for_value(full_text, vb_str_br) or f"Bradesco Produto {vb:.0f}"
 
-                asset = self._parse_row(row_clean, header, current_classe, current_subclasse)
-                if asset:
-                    assets.append(asset)
+                    saldo_liquido_str = ""
+                    for kw in ["saldo líquido", "saldo liquido"]:
+                        for hk, idx in col_map.items():
+                            if kw in hk and idx < len(row_clean):
+                                saldo_liquido_str = row_clean[idx]
+                                break
+                    virtual = [nome] + row_clean[1:]
+                    asset = self._parse_row(virtual, header, current_classe, current_subclasse)
+                    if asset:
+                        assets.append(asset)
+                continue
 
         return assets
 
@@ -120,6 +175,62 @@ class BradescoPlugin(BrokerPlugin):
         """Check if this cell is a header+data concatenation."""
         first_line = cell.split("\n")[0].strip().lower()
         return any(first_line.startswith(hw) for hw in _HEADER_WORDS)
+
+    @staticmethod
+    def _extract_names_from_concat(cell: str) -> List[str]:
+        """Extract ordered product names from a concat header cell.
+
+        Cell format: "Produto\\nPrefix\\n1 rest\\nPrefix2\\n2 rest2\\n3 Name3..."
+        Non-numbered lines before a numbered line become prefixes of that product.
+        Returns ["Prefix rest", "Prefix2 rest2", "Name3", ...] in order.
+        """
+        lines = [ln.strip() for ln in cell.split("\n") if ln.strip()]
+        products = []
+        pending: List[str] = []  # Non-numbered lines (prefix for next numbered item)
+        for ln in lines:
+            if ln.lower().startswith('produto'):
+                continue
+            m = re.match(r'^(\d+)\s+(.+)', ln)
+            if m:
+                rest = m.group(2).strip()
+                full_name = " ".join(pending + [rest]).strip()
+                products.append(full_name)
+                pending = []
+            else:
+                pending.append(ln)
+        return products
+
+    @staticmethod
+    def _find_name_for_value(full_text: str, value_str: str) -> str:
+        """Find product name in full_text that immediately precedes an R$ value line."""
+        text = full_text.replace('\xa0', ' ')
+        lines = [l.strip() for l in text.split('\n')]
+        skip_starts = ("total", "renda", "cdi", "selic", "juro", "prefixado",
+                       "inflação", "inflacao", "composição", "composicao",
+                       "produtos", "classe", "relat", "período", "periodo",
+                       "valor bruto", "per", "r$")
+        best_name = ""
+        # Scan all occurrences and prefer one that has a real product name before it
+        for i, line in enumerate(lines):
+            if value_str not in line or 'R$' not in line:
+                continue
+            for j in range(i - 1, max(i - 6, -1), -1):
+                candidate = lines[j].strip()
+                if not candidate:
+                    continue
+                clo = candidate.lower()
+                if any(clo.startswith(s) for s in skip_starts):
+                    continue
+                if re.match(r'^[\d.,\-\s%]+$', candidate):
+                    continue
+                if re.match(r'^\d{2}/\d{2}/\d{4}$', candidate):
+                    continue
+                if re.search(r'[A-Za-z]', candidate) and len(candidate) >= 3:
+                    best_name = candidate
+                    break
+            if best_name:
+                break
+        return best_name
 
     def _extract_from_concat_cell(self, first_cell: str, row_clean: list,
                                    header: list, classe: str,

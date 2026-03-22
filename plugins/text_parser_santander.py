@@ -610,66 +610,233 @@ class SantanderTextParser:
         return "crédito privado" in lower or "credito privado" in lower
 
     def _parse_book_format(self, full_text: str) -> List[Asset]:
-        """Parse Book Santander with CRÉDITO PRIVADO sections.
+        """Parse Book Santander 'Posição Detalhada de Produtos' page.
 
-        Format: Produto | Data de Contratação | Saldo Bruto | Valor Disp. para Resgate | ...
-        Products appear as text lines followed by numeric data.
+        Structure per asset type:
+        - DEBENTURES: [section] date R$-bruto R$-disp R$-invested tax ...headers... venc qtde EMISSOR
+        - FUNDOS: [section] [headers] NAME date R$-bruto R$-disp R$-cota qtde_cotas ...
+        - CDB: [section] [headers] NAME date R$-bruto R$-disp prazo tax [venc-header] venc
+        - POUPANÇA: [section] [headers] NAME date R$-bruto R$-disp
         """
+        # Normalize non-breaking spaces (U+00A0) that appear in R$ values
+        text = full_text.replace('\xa0', ' ')
+        lines = [ln.strip() for ln in text.split('\n')]
+
+        # Anchor to the "Posição Detalhada de Produtos" page (ASCII substring match)
+        start_line = 0
+        for idx, ln in enumerate(lines):
+            if 'detalhada de produtos' in ln.lower():
+                start_line = idx
+                break
+
         assets = []
-        lines = full_text.split('\n')
+        current_type = None   # 'DEBENTURES', 'FUNDOS', 'CDB', 'POUPANCA'
 
-        in_credito = False
-        current_subclasse = "Pós-fixado"
+        # Known header fragments to skip
+        _HDR = ('produto', 'data de', 'contrata', 'saldo bruto', 'valor disp',
+                'resgate', 'valor investido', 'rentabilidade', 'contratada',
+                'valor da cota', 'quantidade de cotas', 'quantidade de',
+                'quantidade', 'de cotas', 'de sa', '(r',
+                'data da cota', 'valor da taxa', 'prazo',
+                'data de vencimento', 'vencimento',
+                'emissor', 'ativos', 'gerado em',
+                'book de', 'privado')
 
-        i = 0
+        def _skip(ln: str) -> bool:
+            lo = ln.lower()
+            if not ln or re.match(r'^\d{1,2}$', ln):
+                return True
+            return any(lo.startswith(h) for h in _HDR)
+
+        def _is_date(ln: str) -> bool:
+            return bool(re.match(r'^\d{2}/\d{2}/\d{4}$', ln))
+
+        def _get_r(ln: str):
+            """Return numeric value if line is an R$ value line, else None."""
+            m = re.search(r'R\$\s*([\d.,]+)', ln)
+            return parse_br(m.group(1)) if m else None
+
+        def _is_sub_type(ln: str) -> str:
+            """Return normalised sub-type name or ''."""
+            u = ln.upper().strip()
+            if u == 'DEBENTURES':
+                return 'DEBENTURES'
+            if u == 'FUNDOS':
+                return 'FUNDOS'
+            if u == 'CDB':
+                return 'CDB'
+            if u in ('POUPANÇA', 'POUPANCA'):
+                return 'POUPANCA'
+            return ''
+
+        i = start_line
         while i < len(lines):
-            line = lines[i].strip()
+            line = lines[i]
             upper = line.upper()
 
-            # Detect CRÉDITO PRIVADO section
-            if "CRÉDITO PRIVADO" in upper or "CREDITO PRIVADO" in upper:
-                in_credito = True
-                # Detect subclass from context
-                if "PÓS" in upper or "POS" in upper or "CDI" in upper:
-                    current_subclasse = "Pós-fixado"
-                elif "PRÉ" in upper or "PRE" in upper:
-                    current_subclasse = "Pré-fixado"
-                elif "INFLAÇÃO" in upper or "INFLACAO" in upper or "IPCA" in upper:
-                    current_subclasse = "Inflação"
+            # Stop when we reach a new page that is NOT "Detalhada de Produtos"
+            if ('book de investimentos' in line.lower()
+                    and 'detalhada' not in line.lower()
+                    and i > start_line + 5):
+                break
+
+            # Detect sub-type section headers
+            st = _is_sub_type(line)
+            if st:
+                current_type = st
                 i += 1
                 continue
 
-            # Stop sections
-            if any(upper.startswith(s) for s in _STOP_SECTIONS):
-                in_credito = False
+            if current_type is None or _skip(line):
                 i += 1
                 continue
 
-            # Other section headers end CRÉDITO PRIVADO
-            if in_credito and self._is_section_line(upper):
-                in_credito = False
-                i += 1
+            # ---- DEBENTURES: entry starts with a date (data contratação) ----
+            if current_type == 'DEBENTURES' and _is_date(line):
+                data_aplic = line
+                r_values = []
+                taxa_raw = ''
+                emissor = ''
+                j = i + 1
+                while j < min(i + 20, len(lines)):
+                    ln = lines[j]
+                    rv = _get_r(ln)
+                    if rv is not None:
+                        r_values.append(rv)
+                    elif _is_date(ln) and emissor:
+                        pass  # data vencimento — ignore for now
+                    elif re.match(r'^\d{1,3}$', ln):
+                        pass  # quantidade de ativos
+                    elif ('CDI' in ln.upper() or 'IPCA' in ln.upper()
+                          or 'IGPM' in ln.upper() or ('%' in ln and re.search(r'\d', ln))):
+                        taxa_raw = ln
+                    elif re.search(r'[A-Za-z]', ln) and not _skip(ln) and len(ln) > 2:
+                        # First meaningful text after values = emissor name
+                        if r_values:
+                            emissor = ln
+                            j += 1
+                            break
+                    j += 1
+                consumed = j - i
+
+                saldo_bruto = r_values[0] if r_values else None
+                saldo_liquido = r_values[1] if len(r_values) >= 2 else saldo_bruto
+
+                if saldo_bruto and emissor:
+                    # Determine indexador from taxa_raw
+                    if 'IPCA' in taxa_raw.upper():
+                        indexador = 'IPCA +'
+                    elif 'CDI' in taxa_raw.upper():
+                        indexador = '% CDI'
+                    else:
+                        indexador = '-'
+
+                    assets.append(Asset(
+                        corretora=BROKER,
+                        ativo=f'DEB {emissor}',
+                        tipo_ativo='DEB',
+                        data_aplicacao=parse_date(data_aplic),
+                        indexador=indexador,
+                        taxa=None,
+                        vencimento=None,
+                        liquidez=None,
+                        valor_aplicado=None,
+                        valor_bruto=saldo_bruto,
+                        valor_liquido=saldo_liquido,
+                        classe='Renda Fixa',
+                        subclasse='Inflação' if 'IPCA' in taxa_raw.upper() else 'Pós-fixado',
+                    ))
+                i += consumed
                 continue
 
-            if not in_credito:
-                i += 1
-                continue
+            # ---- FUNDOS / CDB / POUPANCA: entry starts with product name ----
+            if current_type in ('FUNDOS', 'CDB', 'POUPANCA'):
+                # Must not start with R$ (avoid picking up zero-value R$ lines)
+                if (not _is_date(line) and _get_r(line) is None
+                        and not line.startswith('R$')
+                        and re.search(r'[A-Za-z]', line)):
+                    # This is the product name (possibly multi-line)
+                    nome_parts = [line]
+                    j = i + 1
+                    # Check if next line is a continuation (short, no date/R$)
+                    if j < len(lines):
+                        nxt = lines[j]
+                        if (nxt and not _is_date(nxt) and _get_r(nxt) is None
+                                and not nxt.startswith('R$')
+                                and not _skip(nxt) and re.search(r'[A-Za-z]', nxt)
+                                and len(nxt) <= 10):
+                            nome_parts.append(nxt)
+                            j += 1
+                    nome = ' '.join(nome_parts)
 
-            # Skip headers/totals
-            if self._is_skip_line(upper):
-                i += 1
-                continue
+                    r_values = []
+                    data_aplic = None
+                    taxa_raw = ''
+                    while j < min(i + 15, len(lines)):
+                        ln = lines[j]
+                        # Hard stop: new page boundary
+                        if 'book de investimentos' in ln.lower():
+                            break
+                        rv = _get_r(ln)
+                        if rv is not None:
+                            r_values.append(rv)
+                        elif _is_date(ln) and not data_aplic:
+                            data_aplic = ln
+                        elif ('CDI' in ln.upper() or 'IPCA' in ln.upper()
+                              or ('%' in ln and re.search(r'\d', ln))):
+                            taxa_raw = ln
+                        elif re.match(r'^\d{1,3}$', ln):
+                            pass  # qtde ativos
+                        elif _skip(ln):
+                            pass
+                        elif (re.search(r'[A-Za-z]', ln) and r_values
+                              and not re.match(r'^\d', ln)
+                              and not ln.startswith('R$')):
+                            # Next product name — stop
+                            break
+                        j += 1
 
-            # Skip empty
-            if not line:
-                i += 1
-                continue
+                    consumed = j - i
+                    saldo_bruto = r_values[0] if r_values else None
+                    saldo_liquido = r_values[1] if len(r_values) >= 2 else saldo_bruto
 
-            # Try to detect product name
-            if self._looks_like_book_product(line):
-                asset, consumed = self._extract_book_product(lines, i, current_subclasse)
-                if asset:
-                    assets.append(asset)
+                    if saldo_bruto and saldo_bruto > 0 and nome:
+                        tipo_ativo = classify_asset(nome)
+                        if tipo_ativo == 'Outro':
+                            if current_type == 'FUNDOS':
+                                tipo_ativo = 'Fundo'
+                            elif current_type == 'CDB':
+                                tipo_ativo = 'CDB'
+                            else:
+                                tipo_ativo = 'Poupança'
+
+                        classe = classify_classe(tipo_ativo)
+                        if 'CDI' in taxa_raw.upper() or current_type == 'CDB':
+                            subclasse = 'Pós-fixado'
+                        elif current_type == 'FUNDOS':
+                            subclasse = 'Multimercado'
+                        elif current_type == 'POUPANCA':
+                            subclasse = 'Poupança'
+                        else:
+                            subclasse = '-'
+
+                        indexador = '% CDI' if subclasse == 'Pós-fixado' else '-'
+
+                        assets.append(Asset(
+                            corretora=BROKER,
+                            ativo=nome,
+                            tipo_ativo=tipo_ativo,
+                            data_aplicacao=parse_date(data_aplic) if data_aplic else None,
+                            indexador=indexador,
+                            taxa=None,
+                            vencimento=None,
+                            liquidez=None,
+                            valor_aplicado=None,
+                            valor_bruto=saldo_bruto,
+                            valor_liquido=saldo_liquido,
+                            classe=classe,
+                            subclasse=subclasse,
+                        ))
                     i += consumed
                     continue
 
@@ -690,12 +857,19 @@ class SantanderTextParser:
             return False
         if re.match(r'^[\d.,]+$', line):
             return False
+        # Reject parenthesized currency markers like "(R$)"
+        if re.match(r'^\(R\$\)', line.strip()):
+            return False
+        # Reject lines that are only punctuation/symbols with R$
+        if re.match(r'^[\(\)R\$\s]+$', line.strip()):
+            return False
         upper = line.upper()
         skip = ("EMISSOR", "TOTAL", "SUBTOTAL", "TAXA", "ÍNDICE", "INDICE",
                 "DATA", "VALOR", "SALDO", "POSIÇÃO", "POSICAO", "RENTAB",
                 "CARTEIRA", "PRODUTO", "CONTRATAÇÃO", "CONTRATACAO",
                 "RESGATE", "PAGAMENTO", "NOTAS", "MOVIMENT", "DISTRIBUI",
-                "%", "CRÉDITO", "CREDITO")
+                "%", "CRÉDITO", "CREDITO", "QUANTIDADE", "QTDE",
+                "VENCIMENTO", "LIQUIDEZ", "DISPONÍVEL", "DISPONIVEL")
         return not any(upper.startswith(s) for s in skip)
 
     def _extract_book_product(self, lines: list, start_idx: int,

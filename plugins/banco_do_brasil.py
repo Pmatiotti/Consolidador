@@ -67,6 +67,10 @@ class BancoDBrasilPlugin(BrokerPlugin):
             if any("CLASSE" in h for h in header_upper):
                 continue
 
+            # SKIP SETOR/SALDO PU tables (fixed-income detail view with quantity)
+            if any("SETOR" in h or "SALDO PU" in h for h in header_upper):
+                continue
+
             # Only use detail tables — must have "ATIVO" in header
             has_ativo = any(h == "ATIVO" for h in header_upper)
             if not has_ativo:

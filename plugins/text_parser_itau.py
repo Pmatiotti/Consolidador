@@ -44,6 +44,16 @@ _SKIP_PATTERNS = (
     "sua carteira detalhada", "sua carteira",
 )
 
+# Single-word garbage labels (risk levels, time periods, etc.)
+_GARBAGE_WORDS = {
+    "alto", "médio", "medio", "baixo", "moderado",
+    "meses", "mês", "mes", "anos", "ano",
+    "sim", "não", "nao",
+    "d+0", "d+1", "d+2", "d+30", "d+31",
+    "diário", "diario", "mensal", "anual",
+    "risco", "liquidez", "resgate",
+}
+
 
 class ItauTextParser:
     """Parser de texto bruto para Itaú Personnalité.
@@ -77,13 +87,41 @@ class ItauTextParser:
             line = lines[i].strip()
             lower = line.lower()
 
-            # Detect start of detailed portfolio
+            # Hard stop: enter footnotes/glossary section — no more asset data
+            if "notas explicativas" in lower or lower.startswith("administrador:"):
+                break
+
+            # Detect start of detailed portfolio (explicit header or section header
+            # immediately followed by a large section-total number)
             if "sua carteira detalhada" in lower:
                 in_carteira = True
                 i += 1
                 continue
 
             if not in_carteira:
+                # Also trigger when a known section header is followed by a big total
+                # (e.g. "Juros pós-fixados" / "1.731.567,70" on the first data page).
+                # The FIRST section's subclasse is set by this first header.
+                section_sub = self._detect_section(lower)
+                if section_sub and i + 1 < len(lines):
+                    next_val = parse_br(lines[i + 1].strip())
+                    if next_val and next_val > 10000:
+                        in_carteira = True
+                        current_subclasse = section_sub
+                        i += 2  # skip first section header + its total
+                        # Skip any additional consecutive section-header+total pairs
+                        # so that the first actual subclasse is preserved for the
+                        # assets that follow immediately.
+                        while i < len(lines):
+                            lx = lines[i].strip().lower()
+                            sub_x = self._detect_section(lx)
+                            if sub_x and i + 1 < len(lines):
+                                nx_val = parse_br(lines[i + 1].strip())
+                                if nx_val and nx_val > 10000:
+                                    i += 2  # skip this header+total too
+                                    continue
+                            break
+                        continue
                 i += 1
                 continue
 
@@ -136,10 +174,28 @@ class ItauTextParser:
             return False
         if not re.search(r'[A-Za-z]', line):
             return False
-        lower = line.lower()
+        lower = line.lower().strip()
         if any(lower.startswith(s) for s in _SKIP_PATTERNS):
             return False
         if re.match(r'^[\d.,\-%]+$', line):
+            return False
+        # Filter single-word garbage labels
+        if lower in _GARBAGE_WORDS:
+            return False
+        # Filter fragment patterns
+        if re.match(r'^(de |do |da |dos |das |um |uma |no |na |em |e |a )', lower):
+            return False
+        # Filter pure date or percentage lines
+        if re.match(r'^\d{2}/\d{2}/\d{2,4}', line):
+            return False
+        # Filter month/year abbreviation like "Fev/26", "Jan/25"
+        if re.match(r'^[A-Za-z]{3}/\d{2}', line):
+            return False
+        # Filter "N meses" / "N anos" patterns like "12 meses", "2 anos"
+        if re.match(r'^\d+\s+(mes|mês|ano)', lower):
+            return False
+        # Filter disclaimer/sentence fragments starting with common Portuguese words
+        if re.match(r'^(mínimo|minimo|milhões|milhoes|para o|de acordo|conforme|durante|exceto|sendo|prazo)', lower):
             return False
         return True
 

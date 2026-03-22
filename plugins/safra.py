@@ -247,10 +247,19 @@ class SafraPlugin(BrokerPlugin):
     # ------------------------------------------------------------------
     # Detail Ações table (pages 8-9)
     # ------------------------------------------------------------------
+    # Section names that mark the start or act as group headers in the position table
+    _POSITION_SECTION_HEADERS = {
+        "renda fixa", "multimercado", "multimercados", "curto prazo",
+        "corretora", "carteira recomendada bdr", "carteira recomendada",
+        "renda variável", "renda variavel", "ações", "acoes",
+        "total",
+    }
+
     def _parse_detail_acoes(self, tables: list) -> List[Asset]:
         """Parse Ações detail table.
 
         Look for tables with columns like: Ativo | ... | Sld Bruto | ... | Sld Líquido
+        Also scans the main position table (Descrição do Produto header) for BDR/stock rows.
         """
         assets = []
         for table in tables:
@@ -260,13 +269,98 @@ class SafraPlugin(BrokerPlugin):
             header = [str(c).strip() if c else "" for c in table[0]]
             header_lower = " ".join(header).lower()
 
-            # Ações table: has "cotação" or "cotacao" (stock price column)
-            if "cotação" not in header_lower and "cotacao" not in header_lower:
-                continue
-            # Exclude fundos table
-            if "cota" in header_lower and "valor cota" in header_lower:
+            # Main position table: "Descrição do Produto" + "Saldo Bruto"
+            is_position_table = ("descrição do produto" in header_lower or
+                                 "descricao do produto" in header_lower)
+
+            # Ações detail table: has "cotação"/"cotacao"
+            is_acoes_table = (("cotação" in header_lower or "cotacao" in header_lower) and
+                              not ("valor cota" in header_lower))
+
+            if not is_position_table and not is_acoes_table:
                 continue
 
+            col_map = self._build_col_map(header)
+
+            if is_position_table:
+                # Only extract rows that are in the ações/BDR sub-section.
+                # If the table has NO section headers at all (e.g., continuation table
+                # with only stock tickers), treat the entire table as ações section.
+                data_rows = [str(r[0]).strip().lower() if r and r[0] else ""
+                             for r in table[1:]]
+                has_section_hdr = any(n in self._POSITION_SECTION_HEADERS for n in data_rows)
+                in_acoes_section = not has_section_hdr
+                for row in table[1:]:
+                    if not row or not row[0]:
+                        continue
+                    row_clean = [str(c).strip() if c else "" for c in row]
+                    nome = row_clean[0]
+                    lower_nome = nome.lower().strip()
+
+                    # Detect section transitions
+                    if lower_nome in self._POSITION_SECTION_HEADERS:
+                        in_acoes_section = lower_nome in (
+                            "corretora", "carteira recomendada bdr",
+                            "carteira recomendada", "renda variável",
+                            "renda variavel", "ações", "acoes",
+                        )
+                        continue
+
+                    if not in_acoes_section:
+                        continue
+
+                    # Skip sub-group headers like "CARTEIRA RECOMENDADA BDR"
+                    if "carteira" in lower_nome:
+                        continue
+
+                    # Skip date rows, empty, total rows
+                    if not nome or len(nome) < 2:
+                        continue
+                    if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
+                        continue
+                    if "total" in lower_nome:
+                        continue
+
+                    # Use the "Saldo Bruto (R$)\n27/02/2026" column (last bruto column)
+                    saldo_bruto = self._get_col(row_clean, col_map,
+                                                ["saldo bruto (r$)\n27", "saldo bruto"])
+                    # If multiple "saldo bruto" columns exist, prefer the rightmost non-zero
+                    if not saldo_bruto or parse_br(saldo_bruto) is None:
+                        # Find all columns containing "saldo bruto" and take last
+                        for h, idx in sorted(col_map.items(), key=lambda x: x[1], reverse=True):
+                            if "saldo bruto" in h and idx < len(row_clean):
+                                saldo_bruto = row_clean[idx]
+                                if parse_br(saldo_bruto) is not None:
+                                    break
+
+                    vb = parse_br(saldo_bruto)
+                    if vb is None or vb == 0:
+                        continue
+
+                    saldo_liquido = self._get_col(row_clean, col_map,
+                                                  ["saldo líquido", "saldo liquido", "líquido"])
+                    tipo_ativo = classify_asset(nome)
+                    if tipo_ativo == "Outro":
+                        tipo_ativo = "FII" if nome.upper().endswith("11") else "Ação"
+
+                    assets.append(Asset(
+                        corretora=BROKER,
+                        ativo=nome,
+                        tipo_ativo=tipo_ativo,
+                        data_aplicacao=None,
+                        indexador="Renda Variável",
+                        taxa=None,
+                        vencimento=None,
+                        liquidez=None,
+                        valor_aplicado=None,
+                        valor_bruto=vb,
+                        valor_liquido=parse_br(saldo_liquido),
+                        classe="Renda Variável",
+                        subclasse="Ações",
+                    ))
+                continue  # done with this position table
+
+            # Ações detail table path (original logic)
             col_map = self._build_col_map(header)
 
             for row in table[1:]:
