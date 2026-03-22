@@ -2,11 +2,12 @@
 
 import logging
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from models.asset import Asset
 from plugins.base import BrokerPlugin
 from utils.asset_classifier import classify_asset, classify_classe
+from utils.date_parser import parse_date
 from utils.number_parser import parse_br
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,9 @@ class BancoDBrasilPlugin(BrokerPlugin):
             if not saldo_bruto or saldo_bruto == 0:
                 return None
 
+            # Clean name (replace embedded newlines from concat PDF cells)
+            nome = nome.replace('\n', ' ').strip()
+
             tipo_ativo = classify_asset(nome)
             if tipo_ativo == "Outro":
                 upper = nome.upper()
@@ -212,14 +216,27 @@ class BancoDBrasilPlugin(BrokerPlugin):
             if classe and actual_classe == "Renda Fixa":
                 actual_classe = classe
 
+            # Extract indexador, taxa and vencimento embedded in the name
+            indexador, taxa, vencimento_str = self._extract_taxa_from_name(nome)
+            vencimento = parse_date(vencimento_str) if vencimento_str else None
+
+            # Derive subclasse from indexador when not already set by section header
+            if subclasse in ("-", ""):
+                if indexador == "IPCA +":
+                    subclasse = "Inflação"
+                elif indexador == "% CDI":
+                    subclasse = "Pós-fixado"
+                elif indexador == "Prefixado":
+                    subclasse = "Pré-fixado"
+
             return Asset(
                 corretora=BROKER,
                 ativo=nome,
                 tipo_ativo=tipo_ativo,
                 data_aplicacao=None,
-                indexador="-",
-                taxa=None,
-                vencimento=None,
+                indexador=indexador,
+                taxa=taxa,
+                vencimento=vencimento,
                 liquidez=None,
                 valor_aplicado=None,
                 valor_bruto=saldo_bruto,
@@ -230,6 +247,83 @@ class BancoDBrasilPlugin(BrokerPlugin):
         except Exception as e:
             logger.warning(f"Erro ao parsear linha BB: {row} - {e}")
             return None
+
+    @staticmethod
+    def _extract_taxa_from_name(nome: str) -> Tuple[str, Optional[float], Optional[str]]:
+        """Extract indexador, taxa, and vencimento string from BB asset name.
+
+        BB names embed rate info in the cell text, e.g.:
+          "CRA BRF 15/07/2027 IPCA 5,30% TX EMISSAO"
+          "CRA RAIZEN 16/08/2032 6,5885% TX EMISSAO"
+          "NTN-B-150535"  (date encoded as DDMMYY)
+
+        Returns (indexador, taxa, vencimento_str).
+        vencimento_str is a DD/MM/YYYY string ready for parse_date(), or None.
+        """
+        name = nome.replace('\n', ' ').strip()
+        upper = name.upper()
+
+        # --- Indexador ---
+        indexador = "-"
+        if "IPCA" in upper or "NTN-B" in upper or "NTNB" in upper:
+            indexador = "IPCA +"
+        elif "CDI" in upper or "REFERENCIADO DI" in upper or "REF DI" in upper:
+            indexador = "% CDI"
+        elif re.search(r'\bPRE\b|\bPREFIXADO\b', upper):
+            indexador = "Prefixado"
+        elif re.match(r'^(CRA|CRI)\b', upper):
+            # CRA/CRI without explicit keyword — almost always IPCA+
+            indexador = "IPCA +"
+
+        # --- Taxa ---
+        taxa = None
+        # Priority 1: number% followed by TX or A.A.
+        m = re.search(r'(\d+[,.]\d+)\s*%\s*(?:TX|A\.?A\.?)', name, re.IGNORECASE)
+        if not m:
+            # Priority 2: IPCA/CDI +/space then number%
+            m = re.search(r'(?:IPCA|CDI)\s*[+]?\s*(\d+[,.]\d+)\s*%', name, re.IGNORECASE)
+        if not m:
+            # Priority 3: any standalone percentage in the name
+            m = re.search(r'(\d+[,.]\d+)\s*%', name)
+        if m:
+            try:
+                taxa = round(float(m.group(1).replace(',', '.')), 4)
+            except ValueError:
+                pass
+
+        # Special case: CDI Referenciado DI funds → 100% CDI
+        if indexador == "% CDI" and taxa is None:
+            if "REFERENCIADO DI" in upper or "REF DI" in upper:
+                taxa = 100.0
+
+        # --- Vencimento ---
+        vencimento_str = None
+        # 1. DD/MM/YYYY
+        m = re.search(r'\b(\d{2}/\d{2}/\d{4})\b', name)
+        if m:
+            vencimento_str = m.group(1)
+        else:
+            # 2. MM/YYYY → 01/MM/YYYY
+            m = re.search(r'\b(\d{2}/\d{4})\b', name)
+            if m:
+                mo, yr = m.group(1).split('/')
+                vencimento_str = f"01/{mo}/{yr}"
+            else:
+                # 3. MM/YY (e.g. "03/27") → 01/MM/20YY
+                m = re.search(r'\b(\d{2}/\d{2})\b', name)
+                if m:
+                    mo, yr2 = m.group(1).split('/')
+                    vencimento_str = f"01/{mo}/{2000 + int(yr2)}"
+                else:
+                    # 4. NTN-B DDMMYY code: "NTN-B-150535" → 15/05/2035
+                    m = re.search(r'NTN[-\s]?B\d?[-\s]+(\d{6})\b', upper)
+                    if not m:
+                        m = re.search(r'NTNB\s+\w+[-\s]+(\d{6})\b', upper)
+                    if m:
+                        code = m.group(1)
+                        vencimento_str = f"{code[0:2]}/{code[2:4]}/{2000 + int(code[4:6])}"
+
+        return indexador, taxa, vencimento_str
 
     @staticmethod
     def _match_subclasse(text: str) -> Optional[str]:
