@@ -37,7 +37,7 @@ class SantanderTextParser:
         if "santander" not in lower:
             return False
         return ("book de investimentos" in lower or "posição detalhada" in lower
-                or "book " in lower and "crédito privado" in lower)
+                or ("book " in lower and "crédito privado" in lower))
 
     def extract_from_text(self, full_text: str) -> List[Asset]:
         assets: List[Asset] = []
@@ -46,7 +46,7 @@ class SantanderTextParser:
         if self._is_book_format(full_text):
             book_assets = self._parse_book_format(full_text)
             if book_assets:
-                assets.extend(book_assets)
+                return self._cleanup(book_assets)
 
         # Try standard Posição Detalhada format
         lines = full_text.split('\n')

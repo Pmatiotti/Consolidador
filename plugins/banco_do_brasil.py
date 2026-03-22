@@ -60,21 +60,22 @@ class BancoDBrasilPlugin(BrokerPlugin):
             if not table or not table[0]:
                 continue
 
-            header = [str(c).strip().upper() if c else "" for c in table[0]]
+            header_raw = [str(c).strip() if c else "" for c in table[0]]
+            header_upper = [h.upper() for h in header_raw]
 
             # SKIP summary tables — they have "CLASSE DO ATIVO" in header
-            if any("CLASSE" in h for h in header):
+            if any("CLASSE" in h for h in header_upper):
                 continue
 
             # Only use detail tables — must have "ATIVO" in header
-            has_ativo = any(h == "ATIVO" for h in header)
+            has_ativo = any(h == "ATIVO" for h in header_upper)
             if not has_ativo:
-                # Also try to detect by column count + known patterns
-                # Some BB detail tables start with empty header row
                 continue
 
-            # Determine column layout (9 or 10 cols, ghost column possible)
-            ncols = len(header)
+            # Build column map from header names
+            col_map = self._build_col_map(header_raw)
+            logger.debug(f"BB table header: {header_raw}")
+            logger.debug(f"BB col_map: {col_map}")
 
             for row in table[1:]:
                 if not row:
@@ -119,74 +120,74 @@ class BancoDBrasilPlugin(BrokerPlugin):
                                                    "carteira", "classe"]):
                     continue
 
-                asset = self._parse_row(row_clean, nome_idx, ncols,
+                asset = self._parse_row(row_clean, col_map,
                                         current_classe, current_subclasse)
                 if asset:
                     assets.append(asset)
 
         return assets
 
-    def _parse_row(self, row: list, nome_idx: int, ncols: int,
+    def _parse_row(self, row: list, col_map: dict,
                    classe: str, subclasse: str) -> Optional[Asset]:
-        """Parse BB detail row.
+        """Parse BB detail row using header-based column mapping.
 
-        BB detail tables have 9 or 10 columns:
-        Layout (typical):
-        [0] Nome | [1] Saldo bruto anterior | [2] Entradas | [3] Saídas
-        [4] Saldo Bruto Atual | [5] ghost/empty | [6] Provisão IR/IOF
-        [7] Saldo Líquido | [8] Participação %
-
-        With ghost column (10 cols): same but shifted — bruto at col 5,
-        líquido at col 7 or 8.
+        BB detail tables have columns like:
+        Ativo | Saldo Bruto Anterior | Entradas | Saídas |
+        Saldo Bruto Atual | (ghost) | Provisão IR/IOF |
+        Saldo Líquido | Participação %
         """
         try:
-            nome = row[nome_idx]
+            # Find the name — first non-empty cell
+            nome = ""
+            for cell in row:
+                if cell and len(cell) >= 2 and not cell.replace('.', '').replace(',', '').replace('-', '').isdigit():
+                    nome = cell
+                    break
+
             if not nome or len(nome) < 2:
                 return None
 
-            # Extract all numeric values from the row (after nome)
-            num_values = []
-            for i in range(nome_idx + 1, len(row)):
-                val = parse_br(row[i])
-                if val is not None:
-                    num_values.append((i, val))
-
-            if not num_values:
-                return None
-
-            # Strategy: find saldo_bruto and saldo_liquido by position
-            # Saldo bruto = col 4 or 5 (depending on ghost col)
-            # Saldo líquido = col 7 or 8
+            # Use header-based column mapping to find bruto and líquido
             saldo_bruto = None
             saldo_liquido = None
 
-            if len(row) >= 9:
-                # Try standard positions first
-                # Bruto: col 4 (or 5 if ghost col)
-                bruto_candidates = [4, 5]
-                for bc in bruto_candidates:
-                    if bc < len(row):
-                        val = parse_br(row[bc])
-                        if val is not None and val > 0:
-                            saldo_bruto = val
-                            break
+            # Try by header name — "saldo bruto atual" or "bruto atual"
+            bruto_str = self._get_col(row, col_map,
+                                       ["saldo bruto atual", "bruto atual",
+                                        "sld bruto atual", "sld. bruto atual"])
+            if bruto_str:
+                saldo_bruto = parse_br(bruto_str)
 
-                # Líquido: col 7 or 8
-                liq_candidates = [7, 8]
-                for lc in liq_candidates:
-                    if lc < len(row):
-                        val = parse_br(row[lc])
-                        if val is not None and val > 0:
-                            saldo_liquido = val
-                            break
-            else:
-                # Short row — take the biggest values
-                big_vals = [(i, v) for i, v in num_values if v > 100]
-                if len(big_vals) >= 2:
-                    saldo_bruto = big_vals[-2][1]
-                    saldo_liquido = big_vals[-1][1]
-                elif len(big_vals) == 1:
-                    saldo_bruto = big_vals[0][1]
+            # If header mapping didn't work, try positional approach
+            # but ONLY use columns AFTER "saídas" column
+            if saldo_bruto is None:
+                saidas_idx = self._find_col_idx(col_map, ["saídas", "saidas"])
+                # Bruto is the first big number AFTER saídas
+                start_idx = (saidas_idx + 1) if saidas_idx is not None else 1
+                for i in range(start_idx, len(row)):
+                    val = parse_br(row[i])
+                    if val is not None and val > 0:
+                        saldo_bruto = val
+                        break
+
+            # Líquido by header
+            liq_str = self._get_col(row, col_map,
+                                     ["saldo líquido", "saldo liquido",
+                                      "sld líquido", "sld. líquido",
+                                      "sld liquido", "sld. liquido"])
+            if liq_str:
+                saldo_liquido = parse_br(liq_str)
+
+            # Líquido positional fallback: last big number before participação
+            if saldo_liquido is None and saldo_bruto is not None:
+                part_idx = self._find_col_idx(col_map, ["participação", "participacao", "partic"])
+                end_idx = (part_idx) if part_idx is not None else len(row)
+                # Work backwards from end to find líquido
+                for i in range(end_idx - 1, 0, -1):
+                    val = parse_br(row[i])
+                    if val is not None and val > 0 and val != saldo_bruto:
+                        saldo_liquido = val
+                        break
 
             if not saldo_bruto or saldo_bruto == 0:
                 return None
@@ -232,4 +233,28 @@ class BancoDBrasilPlugin(BrokerPlugin):
         for key, val in SUBCLASSE_MAP.items():
             if key in text:
                 return val
+        return None
+
+    @staticmethod
+    def _build_col_map(header: list) -> dict:
+        col_map = {}
+        for i, h in enumerate(header):
+            col_map[h.lower().strip()] = i
+        return col_map
+
+    @staticmethod
+    def _get_col(row: list, col_map: dict, keywords: list, default: str = "") -> str:
+        for kw in keywords:
+            for h, idx in col_map.items():
+                if kw in h:
+                    if idx < len(row):
+                        return row[idx]
+        return default
+
+    @staticmethod
+    def _find_col_idx(col_map: dict, keywords: list) -> Optional[int]:
+        for kw in keywords:
+            for h, idx in col_map.items():
+                if kw in h:
+                    return idx
         return None

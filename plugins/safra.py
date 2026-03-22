@@ -98,6 +98,9 @@ class SafraPlugin(BrokerPlugin):
                     continue
                 if lower_nome == "ativo":
                     continue
+                # Skip date-like names (movimentação rows)
+                if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
+                    continue
 
                 asset = self._parse_detail_rf_row(row_clean, col_map)
                 if asset:
@@ -207,6 +210,9 @@ class SafraPlugin(BrokerPlugin):
                     continue
                 if "total" in lower_nome:
                     continue
+                # Skip date-like names (movimentação rows)
+                if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
+                    continue
 
                 saldo_bruto = self._get_col(row_clean, col_map, ["sld. bruto", "bruto"])
                 saldo_liquido = self._get_col(row_clean, col_map, ["sld. líquido", "sld. liquido", "líquido"])
@@ -274,6 +280,9 @@ class SafraPlugin(BrokerPlugin):
                 lower_nome = nome.lower()
                 if lower_nome in CLASS_HEADERS or "total" in lower_nome:
                     continue
+                # Skip date-like names (movimentação rows)
+                if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
+                    continue
 
                 saldo_bruto = self._get_col(row_clean, col_map, ["sld bruto", "sld. bruto", "bruto"])
                 saldo_liquido = self._get_col(row_clean, col_map, ["sld líquido", "sld. líquido", "líquido"])
@@ -337,6 +346,9 @@ class SafraPlugin(BrokerPlugin):
                     current_classe = nome
                     continue
                 if "total" in lower_nome:
+                    continue
+                # Skip date-like names (movimentação rows)
+                if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
                     continue
 
                 saldo_bruto = self._get_col(row_clean, col_map, ["sld bruto", "bruto"])

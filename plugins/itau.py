@@ -41,6 +41,23 @@ CLASS_HEADERS = {
     "total", "total da carteira", "total geral",
 }
 
+# Garbage names that appear in Itaú tables but are not asset names
+_GARBAGE_NAMES = {
+    # Risk levels
+    "alto", "médio", "medio", "baixo", "moderado",
+    # Generic fragments
+    "meses", "mês", "mes", "anos", "ano",
+    "de um fundo", "de um", "do fundo",
+    "sim", "não", "nao",
+    # Column headers that leak as data
+    "produto", "saldo", "aplicação", "aplicacao",
+    "vencto", "taxa contrat", "partic carteira",
+    "risco", "liquidez", "resgate",
+    # Section labels
+    "sua carteira detalhada", "sua carteira",
+    "carteira de investimentos",
+}
+
 # Lines to skip
 SKIP_PATTERNS = (
     "% do cdi", "% do ibovespa", "retorno sobre o ifix",
@@ -168,6 +185,10 @@ class ItauPlugin(BrokerPlugin):
                     if is_class_header:
                         continue
 
+                # Filter garbage names
+                if self._is_garbage_name(nome):
+                    continue
+
                 # Extract values
                 asset = self._parse_asset_row(row_clean, col_map, nome,
                                               current_classe, current_subclasse)
@@ -263,3 +284,34 @@ class ItauPlugin(BrokerPlugin):
         except Exception as e:
             logger.warning(f"Erro ao parsear linha Itaú: {row} - {e}")
             return None
+
+    @staticmethod
+    def _is_garbage_name(nome: str) -> bool:
+        """Filter out garbage names that are not real asset names."""
+        if not nome or len(nome) < 2:
+            return True
+        lower = nome.lower().strip()
+        # Exact match against known garbage
+        if lower in _GARBAGE_NAMES:
+            return True
+        # Too short — likely metadata fragment
+        if len(lower) <= 3 and not re.search(r'[A-Z]{2,}', nome):
+            return True
+        # Pure date
+        if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
+            return True
+        # Pure number or percentage
+        if re.match(r'^[\d.,\-%]+$', nome.strip()):
+            return True
+        # Single common word that's not an asset
+        single_word_garbage = {"alto", "médio", "medio", "baixo", "moderado",
+                               "meses", "mês", "mes", "anos", "ano", "sim", "não", "nao",
+                               "d+0", "d+1", "d+2", "d+30", "d+31", "d+32",
+                               "diário", "diario", "mensal", "anual",
+                               "resgate", "liquidez", "risco"}
+        if lower in single_word_garbage:
+            return True
+        # Fragment patterns: "de um fundo", "do fundo", etc.
+        if re.match(r'^(de |do |da |dos |das |um |uma |no |na )', lower):
+            return True
+        return False

@@ -224,12 +224,16 @@ class BradescoPlugin(BrokerPlugin):
             if not nome or len(nome) < 2:
                 return None
 
-            # Skip date-like names (e.g. "01/01/2025")
-            if re.match(r'^\d{2}/\d{2}/\d{4}$', nome.strip()):
+            # Skip date-like names (e.g. "01/01/2025" or "28/09/21")
+            if re.match(r'^\d{2}/\d{2}/\d{2,4}$', nome.strip()):
                 return None
 
             # Skip pure number names
             if re.match(r'^[\d.,]+$', nome.strip()):
+                return None
+
+            # Skip percentage names (e.g. "100,00%")
+            if re.match(r'^[\d.,]+%$', nome.strip()):
                 return None
 
             col_map = {}
